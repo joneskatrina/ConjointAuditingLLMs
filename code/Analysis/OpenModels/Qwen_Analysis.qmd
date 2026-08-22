@@ -1,0 +1,722 @@
+---
+title: "Analysis of Qwen2-7B-Instruct Data: Financial Analyst Hiring Scenario"
+editor: source
+date: today
+format: 
+  html:
+    embed-resources: true
+    message: false
+    warning: false
+    highlight-style: pygments
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages & Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lmtest)
+library(marginaleffects)
+library(purrr)
+library(sandwich)
+library(stringr)
+library(tidyr)
+
+# load custom functions for modeling, plotting, etc. 
+source(here::here("code/R/tools.r"))
+
+theme_set(theme_nice())
+
+# font setup: 
+# for the plots used in the paper, we use times new roman font, but this
+# part depends on the specific local font setup/paths; not running/rendering
+# this everytime
+#
+# library(showtext)
+# library(sysfonts)
+# 
+# font_add(
+#   "TimesNewRoman",
+#   regular = "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
+#   bold = "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf"
+# )
+# 
+# showtext_auto()
+# theme_set(theme_nice(base_family = "TimesNewRoman"))
+```
+
+# Data
+
+```{r}
+qwen <- readr::read_csv2(here::here("perma_data/Scenarios/FinacialAnalyst/qwen.csv"))
+names(qwen)
+```
+
+
+```{r}
+qwen <- 
+  qwen |> 
+  mutate(
+    across(gender:experience, factor),
+    
+    # Baselines:
+    
+    race = factor(race, levels = c("White", "Black", "Hispanic", "Asian")),
+    gender = factor(gender, levels = c("Male", "Female", "Non-binary")),
+    disability_status = factor(
+      disability_status,
+      levels = c(
+        "None stated", 
+        "Physical disability",
+        "Mental health history"
+      )
+    ),
+    experience = factor(
+      experience,
+      levels = c(
+        "0-2 years",
+        "3-7 years",
+        "10+ years"
+      )
+    )
+  )
+```
+
+# Unconditional estimates
+
+## AMCEs
+
+```{r}
+amce_res <- amce(
+  chosen ~ gender + age + race + disability_status + 
+    nationality + education + field_of_study + cover_letter + 
+    recommendations + experience,
+  data = qwen
+)
+
+amce_res
+```
+
+Visually:
+
+```{r}
+amce_res |> 
+  mutate(
+    attr = 
+      attr |> 
+      gsub("_", " ", x = _) |> 
+      stringr::str_to_sentence(),
+    label = stars(p.value)
+  ) |> 
+  ggplot(aes(x = estimate, y = level, color = attr)) +
+  geom_vline(aes(xintercept = 0), lty = "dotted") +
+  geom_point(size = 2) +
+  geom_text(aes(label = label), position = position_nudge(y = .1)) +
+  geom_linerange(aes(xmin = lower, xmax = upper), lwd = 1) +
+  facet_wrap(~attr, scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(x = "", y = "")
+```
+
+## Marginal means
+
+```{r}
+mm_res <-mm(
+  chosen ~ gender + age + race + disability_status + 
+    nationality + education + field_of_study + cover_letter + 
+    recommendations + experience,
+  data = qwen
+)
+
+mm_res
+```
+
+Visually:
+
+```{r}
+# overall MM/baseline selection prob.:
+omean <- mean(qwen$chosen, na.rm = TRUE)
+
+mm_res |> 
+  mutate(
+    attr = 
+      attr |> 
+      gsub("_", " ", x = _) |> 
+      stringr::str_to_sentence()
+  ) |> 
+  ggplot(aes(x = estimate, y = level, color = attr)) +
+  geom_vline(aes(xintercept = omean), lty = "dotted") +
+  geom_point() +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~attr, scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(
+    x = "", 
+    y = "",
+    caption = "Vertical line = marginal probability of being hired"
+  )
+```
+
+## Other checks
+
+### Relative importance
+
+Lindemann, Merenda & Gold (LMG) importance; equivalent to Shapley-decomposition. Basically share of explained variance accountable to each variable. Factor variables are 'grouped'.
+
+```{r}
+#| eval: false
+# we load the bootstrapped results from a backup below, only run this
+# to reproduce (is not re-run on render)
+
+mod_full <- lm(
+  chosen ~ education + field_of_study + cover_letter + 
+    recommendations + experience + gender + age + race + 
+    disability_status + nationality,
+  data = qwen
+)
+
+set.seed(42)
+
+rel_imp <- relaimpo::boot.relimp(
+  mod_full, 
+  type = "lmg", 
+  rela = TRUE, 
+  boot = 500
+)
+
+eval_imp <- relaimpo::booteval.relimp(rel_imp, level = 0.95, sort = TRUE)
+
+eval_imp
+```
+
+Cleaning the results:
+
+```{r}
+#| eval: false
+# same here, not run by default since we load results from a backup below
+
+imp_df <-
+  as.data.frame(eval_imp@mark) |> 
+  setNames(c("percentage", "rating", "lower", "upper")) |> 
+  tibble::rownames_to_column("variable") |> 
+  mutate(
+    variable = gsub(".lmg", "", variable),
+    across(c(percentage, lower, upper), as.numeric),
+    group = if_else(
+      variable %in% c("race", "age", "disability_status", "gender", "nationality"),
+      "Sensitive",
+      "Non-sensitive"
+    )
+  ) |> 
+  tibble() |> 
+  select(-rating)
+
+# Export so we do not have to re-run this all the time:
+imp_df |> readr::write_csv(here::here("perma_data/Scenarios/FinacialAnalyst/qwen_relimp.csv"))
+```
+
+Visually:
+
+```{r}
+imp_df <- readr::read_csv(here::here("perma_data/Scenarios/FinacialAnalyst/qwen_relimp.csv"))
+
+imp_df |> 
+  mutate(
+    variable = variable |> 
+      stringr::str_replace_all("_", " ") |> 
+      stringr::str_to_sentence()
+  ) |> 
+  ggplot(
+    aes(
+      x = percentage, 
+      y = forcats::fct_reorder(variable, percentage),
+      color = group
+    )
+  ) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  scale_x_continuous(labels = scales::label_percent()) +
+  labs(
+    x = "Proportion of explained variance explained",
+    y = "",
+    color = "",
+    caption = "Bootstrapped confidence intervals"
+  )
+```
+
+By sensitive/nonsensitive:
+
+```{r}
+imp_df |> 
+  group_by(group) |> 
+  summarise(across(c(percentage, lower, upper), sum)) |> 
+  ggplot(
+    aes(
+      x = percentage, 
+      y = forcats::fct_reorder(group, percentage),
+      color = group
+    )
+  ) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  theme(legend.position = "none") +
+  labs(
+    x = "Proportion of explained variance explained",
+    y = "",
+    caption = "Bootstrapped confidence intervals"
+  ) +
+  scale_x_continuous(labels = scales::label_percent())
+```
+
+# Intersectional bias
+
+Conceptually, we assess two different types of effect dependence. First, conditional effects, e.g. 
+
+$$
+\text{Black}_{\text{Disabled}} - \text{White}_\text{Disabled}
+$$
+Assessing whether disabled candidates have a different probability to be selected when being black vs. when being white, and interaction,
+
+$$
+(\text{Black}_{\text{Disabled}} - \text{White}_\text{Disabled}) - (\text{Black}_{\text{Able}} - \text{White}_\text{Able})
+$$
+i.e. "does the black vs. white gap differ for respondents differ depending on disability (and vice versa)"?
+
+## Race/Gender
+
+```{r}
+m_race_gender <- lm(chosen ~ race*gender, qwen)
+coeftest(m_race_gender, vcov. = vcovHC(m_race_gender, type = "HC2"))
+```
+
+Conditional AMCEs:
+
+```{r}
+qwen |>
+  camce_plot(race, gender) +
+  labs(color = "Race")
+```
+
+Conditional MMs:
+
+```{r}
+
+qwen |> 
+  cmm_plot(gender, race) +
+  labs(color = "race")
+
+# Heatmap
+#
+# cmm_gender_race |> 
+#   ggplot(aes(x = level, y = race, fill = estimate)) +
+#   geom_tile() +
+#   scale_fill_distiller(
+#     palette = "RdBu",
+#     direction = -1,
+#     labels = scales::label_percent(suffix = "pp.")
+#   ) +
+#   theme_minimal()
+```
+
+## Gender/Nationality
+
+```{r}
+m_nat_gender <- lm(chosen ~ nationality*gender, qwen)
+coeftest(m_nat_gender, vcov. = vcovHC(m_nat_gender, type = "HC2"))
+```
+
+
+```{r}
+qwen |> 
+  camce_plot(gender, nationality) +
+  labs(color = "Gender")
+```
+
+```{r}
+qwen |> 
+  cmm_plot(nationality, gender) +
+  labs(color = "Gender")
+```
+
+## Disability/Gender
+
+```{r}
+m_dis_gender <- lm(chosen ~ disability_status*gender, qwen)
+
+res_dis_gender <- coeftest(
+  m_dis_gender, 
+  vcov. = vcovHC(m_dis_gender, type = "HC2")
+)
+
+res_dis_gender
+```
+
+Nicely format this into a regression table, latex output:
+
+```{r}
+rownames(res_dis_gender) <- 
+  rownames(res_dis_gender) |> 
+  str_replace_all(c(
+    "disability_status" = "",
+    "gender" = "",
+    ":" = " × "
+  ))
+
+res_dis_gender |> 
+  #stargazer::stargazer(type = "text")
+  stargazer::stargazer(type = "latex")
+```
+
+
+Conditional AMCEs:
+
+```{r}
+qwen |>
+  camce_plot(gender, disability_status) +
+  theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  labs(color = "Gender", shape = "Gender") +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.9, 0.7),
+    plot.margin = margin(t = 10, r = 20, b = 10, l = 0)
+  ) +
+  scale_y_discrete(
+    labels = (\(x, ...) gsub("\\s", "\n", x))(levels(qwen$disability_status))
+    #expand = expansion(add = c(1, 1))
+  ) +
+  xlim(c(-.04, .04))
+
+
+# ggsave(
+#   here::here("writing/tex/figures/gender_disability_qwen.pdf"),
+#   width = 5,
+#   height = 3
+# )
+```
+
+Conditional MMs:
+
+```{r}
+qwen |>
+  cmm_plot(disability_status, gender) +
+  #theme_nice(base_size = 14, base_family = "TimesNewRoman") +
+  labs(color = "Gender", shape = "Gender") +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.9, 0.85),
+    plot.margin = margin(t = 10, r = 20, b = 10, l = 0)
+  ) +
+  scale_y_discrete(
+    labels = (\(x, ...) gsub("\\s", "\n", x))(levels(qwen$disability_status))
+  ) +
+  xlim(c(omean - .06, omean + .06))
+
+# ggsave(
+#   here::here("writing/tex/figures/gender_disability_qwen_mm.pdf"),
+#   width = 5,
+#   height = 4
+# )
+```
+
+## Disability/Race
+
+```{r}
+m_race_dis <- lm(chosen ~ race*disability_status, qwen)
+coeftest(m_race_dis, vcov. = vcovHC(m_race_dis, type = "HC2"))
+```
+
+Conditional AMCEs:
+
+```{r}
+qwen |>
+  camce_plot(race, disability_status) +
+  labs(color = "Race")
+```
+
+Conditional MMs:
+
+```{r}
+qwen |>
+  cmm_plot(race, disability_status) +
+  labs(color = "Race")
+```
+
+```{r}
+qwen |>
+  cmm_plot(disability_status, race) +
+  labs(color = "Disability")
+```
+
+
+## Gender w/ relevant attributes
+
+The effect of relevant attributes, like experience, also differs across genders.
+
+```{r}
+m_gender_exp <- lm(chosen ~ gender*experience, qwen)
+coeftest(m_gender_exp, vcov. = vcovHC(m_gender_exp, type = "HC2"))
+```
+
+```{r}
+qwen |> 
+  camce_plot(gender, experience) +
+  labs(color = "Gender")
+```
+
+
+```{r}
+# need to do this manually to relevel experience here:
+
+qwen |> 
+  conditional_mm(chosen ~ experience, group = gender, data = _) |> 
+  mutate(
+    level = level |> factor(
+      levels = c("0-2 years", "3-7 years", "10+ years")
+    )
+  ) |> 
+  ggplot(aes(x = estimate, y = level, color = gender)) +
+  geom_vline(xintercept = omean, lty = "dotted") +
+  geom_point(position = position_dodge(.2)) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(.2)
+  ) +
+  labs(
+    x = "Pr(Hired)",
+    y = "Experience",
+    caption = "Horizontal line = marginal hiring probability",
+    color = "Gender"
+  ) +
+  coord_flip() # flipping (I think experience makes more sense this way)
+```
+
+## Race w/ relevant attributes
+
+```{r}
+m_race_exp <- lm(chosen ~ race*experience, qwen)
+res_race_exp <- coeftest(m_race_exp, vcov. = vcovHC(m_race_exp, type = "HC2"))
+
+res_race_exp
+```
+
+Regression table:
+
+```{r}
+rownames(res_race_exp) <- 
+  rownames(res_race_exp) |> 
+  str_replace_all(c(
+    "experience" = "",
+    "race" = "",
+    ":" = " × "
+  ))
+
+res_race_exp |> 
+  #stargazer::stargazer(type = "text")
+  stargazer::stargazer(type = "latex")
+```
+
+
+```{r}
+qwen |> 
+  conditional_amce(chosen ~ race, group = experience, data = _) |> 
+  mutate(label = stars(p.value)) |> 
+  ggplot(aes(x = experience, y = estimate, color = level, shape = level)) +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(.45)) +
+  geom_linerange(
+    aes(ymin = lower, ymax = upper),
+    position = position_dodge(.45)
+  ) +
+  geom_text(
+    aes(label = label), 
+    position = position_dodge(.45),
+    hjust = 1.1,
+    vjust = .1, 
+    show.legend = FALSE
+  ) +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  #theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.2, 0.2)
+  ) +
+  labs(
+    x = "Change in Pr(Hired)",
+    y = "",
+    color = "Race",
+    shape = "Race"
+  )
+
+# ggsave(
+#   here::here("writing/tex/figures/race_experience_qwen.pdf"),
+#   width = 7, 
+#   height = 5
+# )
+```
+
+```{r}
+qwen |> 
+  conditional_amce(chosen ~ race, group = experience, data = _) |> 
+  filter(level != "White") |> 
+  mutate(label = stars(p.value)) |> 
+  ggplot(aes(x = experience, y = estimate, color = level, shape = level)) +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  geom_ribbon(
+    aes(ymin = lower, ymax = upper, group = level, fill = level),
+    alpha = .1,
+    color = NA
+  ) +
+  geom_point() +
+  geom_line(aes(group = level)) +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  rcartocolor::scale_fill_carto_d(palette = "Prism") +
+  #theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.3, 0.2)
+  ) +
+  labs(
+    x = "Experience",
+    y = "Conditional AMCE (vs. White)",
+    color = "Race",
+    shape = "Race",
+    fill = "Race"
+  )
+
+# ggsave(
+#   here::here("writing/tex/figures/race_experience_qwen_alt.pdf"),
+#   width = 7, 
+#   height = 5
+# )
+```
+
+
+Conditional marginal means:
+
+```{r}
+# Nice for paper:
+
+qwen |> 
+  conditional_mm(chosen ~ experience, group = race, data = _) |> 
+  mutate(
+    level = level |> factor(
+      levels = c("0-2 years", "3-7 years", "10+ years")
+    )
+  ) |> 
+  ggplot(aes(x = estimate, y = level, color = race, shape = race)) +
+  geom_vline(xintercept = omean, lty = "dotted") +
+  geom_point(position = position_dodge(.2)) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(.2)
+  ) +
+  labs(
+    x = "Pr(Hired)",
+    y = "Experience",
+    color = "Race",
+    shape = "Race"
+  ) +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  coord_flip() +
+  #theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  theme(
+    axis.line.x = element_line(color = "grey50"),
+    axis.line.y = element_line(color = "grey50"),
+    axis.ticks.x = element_line(color = "grey50"),
+    axis.ticks.y = element_line(color = "grey50"),
+    legend.position = "inside", 
+    legend.position.inside = c(0.9, 0.25)
+  )
+
+# ggsave(
+#   here::here("writing/tex/figures/race_experience_qwen_cmm.pdf"),
+#   width = 7,
+#   height = 5
+# )
+```
+
+
+
+# Quantile profiles
+
+Calculate exemplary profiles: what does the ideal, and worst possible candidate (and some in between) look like to Qwen?
+
+```{r}
+
+# AMCEs / model of qwen's preferences:
+
+amce_mod <- 
+  glm(
+    chosen ~ gender + age + race + disability_status + 
+      nationality + education + field_of_study + cover_letter + 
+      recommendations + experience, 
+    data = qwen,
+    family = binomial(link = "logit")
+  )
+
+# Generate all possible profiles:
+
+all_profiles <- 
+  qwen |> 
+  select(gender:experience) |> 
+  map(levels) |> 
+  expand.grid() |> 
+  tibble()
+
+# For each profile, estimate how likely it is to be selected by qwen:
+
+preds <- 
+  amce_mod |> 
+  marginaleffects::predictions(all_profiles, conf_level = .95) |> 
+  broom::tidy() |> 
+  mutate(percentile = percent_rank(estimate) * 100)
+
+selected <- 
+  preds |> 
+  arrange(estimate) |> 
+  # select some at certain quantiles (best, worst, 25, 50 & 75% of dist.):
+  slice(c(1, round(n() * c(0.25, 0.50, 0.75)), n()))
+```
+
+Graphically:
+
+```{r}
+
+selected |> 
+  mutate(
+    percentile_label = paste0(round(percentile), "th percentile"),
+    label = paste(
+      "Gender:", gender, "\n",
+      "Age:", age, "\n",
+      "Race:", race, "\n",
+      "Disability:", disability_status, "\n",
+      "Nationality:", nationality, "\n",
+      "Education:", education, "\n",
+      "Studies:", field_of_study, "\n",
+      "Cover letter:", cover_letter, "\n",
+      "Recommendations:", recommendations, "\n",
+      "Experience:", experience
+    )
+  ) |> 
+  ggplot(aes(x = estimate, y = forcats::fct_reorder(label, estimate))) +
+  geom_vline(xintercept = omean, lty = "dotted") +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
+  geom_text(
+    aes(x = 1.1, label = percentile_label), 
+    hjust = 1, 
+    size = 3, 
+    color = "grey50"
+  ) +
+  labs(
+    x = "Estimated Pr(Hired) (LPM)",
+    y = NULL,
+    caption = "Vertical line = marginal hiring probability"
+  )
+```
+

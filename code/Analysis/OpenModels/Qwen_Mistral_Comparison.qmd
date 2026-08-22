@@ -1,0 +1,527 @@
+---
+title: "Model comparison: Qwen2-7B-Instruct - Mistral-7B-Instruct-v0.2 on Financial Analyst Hiring Scenario Data"
+editor: source
+date: today
+format: 
+  html:
+    embed-resources: true
+    message: false
+    warning: false
+    highlight-style: pygments
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages & Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(marginaleffects)
+library(purrr)
+library(tidyr)
+
+# load custom functions for modeling, plotting etc.
+source(here::here("code/R/tools.r"))
+
+theme_set(theme_nice())
+
+# font setup: 
+# for the plots used in the paper, we use times new roman font, but this
+# part depends on the specific local font setup/paths; not running/rendering
+# this everytime
+
+
+library(showtext)
+library(sysfonts)
+
+font_add(
+   "TimesNewRoman",
+   #regular = "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
+   regular = "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+   #bold = "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf"
+   bold = "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf"
+ )
+
+showtext_auto()
+theme_set(theme_nice(base_family = "TimesNewRoman"))
+```
+
+# Data
+
+```{r}
+Mistral <- readr::read_csv(here::here("perma_data/Scenarios/FinacialAnalyst/mistral.csv"))
+Qwen <- readr::read_csv2(here::here("perma_data/Scenarios/FinacialAnalyst/qwen.csv"))
+
+# downsample chatgpt data so we have same obs across both (10k):
+
+# set.seed(42)
+# 
+# Qwen <- Qwen[sample(1:nrow(Qwen), 1e4), ]
+
+both <- bind_rows(
+  Mistral |> mutate(model = "Mistral-7B-Instruct-v0.2"),
+  Qwen |> mutate(model = "Qwen2-7B-Instruct")
+)
+```
+
+# Cleaning & releveling
+
+```{r}
+both <- 
+  both |> 
+  mutate(
+    across(gender:experience, factor),
+    
+    # Baselines setzen:
+    
+    race = factor(race, levels = c("White", "Black", "Hispanic", "Asian")),
+    gender = factor(gender, levels = c("Male", "Female", "Non-binary")),
+    disability_status = factor(
+      disability_status,
+      levels = c(
+        "None stated", 
+        "Physical disability",
+        "Mental health history"
+      )
+    ),
+    experience = factor(
+      experience,
+      levels = c(
+        "0-2 years",
+        "3-7 years",
+        "10+ years"
+      )
+    )
+  ) |> 
+  # nested structure
+  group_by(model) |> 
+  nest()
+
+both
+```
+
+# Unconditional estimates
+
+```{r}
+res <- 
+  both |> 
+  mutate(
+    
+    # baseline selection probability:
+    omean = map_dbl(data, function(d) mean(d$chosen, na.rm = TRUE)),
+    
+    # AMCEs:
+    amce_res = map(data, function(d) {
+      
+      amce(
+        chosen ~ gender + age + race + 
+          disability_status + nationality + education + field_of_study + 
+          cover_letter + recommendations + experience,
+        data = d
+      )
+      
+    }),
+    
+    # marginal means:
+    mm_res = map(data, function(d) {
+      
+      mm(
+        chosen ~ gender + age + race + 
+          disability_status + nationality + education + field_of_study + 
+          cover_letter + recommendations + experience,
+        data = d
+      )
+      
+    })
+  )
+```
+
+## AMCEs
+
+Careful on interpretation here; cannot interpret numerical differences between AMCEs across models as indicative of relative favorability (baselines not the same). But we *can* interprete differences in directionality & significance (just not the absolute difference across models).
+
+Qwen und Mistral only sensitive:
+
+```{r}
+res |> 
+  select(model, amce_res) |> 
+  unnest(amce_res) |> 
+  ungroup() |> 
+  filter(attr %in% c("age", "disability_status", "gender", "race", "nationality")) |> 
+  mutate(
+    attr = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence(),
+    label = stars(p.value)
+  ) |> 
+  ggplot(aes(x = estimate, y = level, color = model, shape = model)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(width = .2)) +
+  geom_text(
+    aes(label = label),
+    position = position_dodge(width = .2),
+    vjust = .33,
+    show.legend = FALSE
+  ) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(width = .2)
+  ) +
+  #facet_wrap(~model, scales = "free_y", ncol = 2) +
+  facet_grid(rows = vars(attr), cols = vars(model), scales = "free_y", switch = "y") +
+  scale_color_manual(
+    name = "Model",
+    values = c(
+      "Mistral-7B-Instruct-v0.2" = "#DB0500",
+      "Qwen2-7B-Instruct" = "#6D67E6"
+    )
+  ) +
+  labs(
+    x = "AMCE",
+  ) +
+  theme_nice(base_size = 18, base_family = "TimesNewRoman") +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(colour="grey"),
+    axis.title.y = element_blank()
+  ) +
+  scale_y_discrete(
+    labels = function(l) {
+      l |> replace_values(
+        "Physical disability" ~ "Physical\ndisability",
+        "Mental health history" ~ "Mental health\nhistory"
+      )
+    }
+  )
+
+# ggsave(
+#   here::here("writing/tex/figures/amce_both.pdf"), 
+#   width = 13, 
+#   height = 10
+# )
+# 
+# knitr::plot_crop(here::here("writing/tex/figures/amce_both.pdf"))
+```
+
+
+## Marginal means
+
+Since both models have a different marginal selection probability, we subtract each models marginal selection probability from the marginal means. This way, we show how the marginal mean relative to overall baseline probability of each model selecting a profile.
+
+```{r}
+res |> 
+  select(model, omean, mm_res) |> 
+  unnest(mm_res) |> 
+  filter(attr %in% c("age", "disability_status", "gender", "race", "nationality")) |> 
+  ungroup() |> 
+  mutate(
+    across(c(estimate, lower, upper), \(x) x - omean)
+  ) |> 
+  mutate(
+    attr = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence()
+  ) |> 
+  ggplot(aes(x = estimate, y = level, color = model, shape = model)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(width = .5)) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(width = .5)
+  ) +
+  facet_wrap(~attr, scales = "free_y", ncol = 1) +
+  scale_color_manual(
+    values = c(
+     "Mistral-7B-Instruct-v0.2" = "#DB0500",
+      "Qwen2-7B-Instruct" = "#6D67E6"
+    )
+  ) +
+  labs(
+    x = "Pr(Hired|Attribute = Level) - Pr(Hired)",
+    color = NULL,
+    shape = NULL
+  ) +
+  theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  theme(
+    legend.position = "bottom", 
+    legend.direction = "vertical",
+    panel.border = element_rect(color = "grey"),
+    axis.title.y = element_blank()
+  ) +
+  scale_y_discrete(
+    labels = function(l) {
+      l |> replace_values(
+        "Physical disability" ~ "Physical\ndisability",
+        "Mental health history" ~ "Mental health\nhistory"
+      )
+    }
+  )
+
+# ggsave(
+#   here::here("writing/tex/figures/mms_both.pdf"), 
+#   width = 7, 
+#   height = 9,
+#   device = cairo_pdf
+# )
+# 
+# knitr::plot_crop(here::here("writing/tex/figures/mms_both.pdf"))
+```
+
+## Total bias
+
+Amount of explained variance in choices attributable to sensitive attributes in both models:
+
+```{r}
+Qwen_imp <-
+  readr::read_csv(here::here("perma_data/Scenarios/FinacialAnalyst/qwen_relimp.csv")) |>
+  mutate(model = "Qwen2-7B-Instruct")
+
+Mistral_imp <-
+  readr::read_csv(here::here("perma_data/Scenarios/FinacialAnalyst/mistral_relimp.csv")) |>
+  mutate(model = "Mistral-7B-Instruct-v0.2")
+
+imp <- bind_rows(Qwen_imp, Mistral_imp)
+```
+
+Overall:
+
+```{r}
+imp |> 
+  mutate(
+    variable = 
+      variable |> 
+      str_replace_all("_", " ") |> 
+      str_to_sentence()
+  ) |> 
+  group_by(variable) |> 
+  mutate(within_avg = mean(percentage)) |> 
+  ungroup() |> 
+  ggplot(
+    aes(
+      x = percentage, 
+      y = forcats::fct_reorder(variable, within_avg),
+      color = model,
+      shape = model
+    )
+  ) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(width = .2)) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(width = .2)
+  ) +
+  scale_color_manual(
+    values = c(
+      "Mistral-7B-Instruct-v0.2" = "#DB0500",
+      "Qwen2-7B-Instruct" = "#6D67E6"
+    )
+  ) +
+  labs(
+    x = "Proportion of explained variance explained",
+    y = "",
+    color = "Model", shape = "Model"
+  ) +
+  scale_x_continuous(labels = scales::label_percent()) +
+  #theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.85, 0.2),
+    plot.margin = margin(t = 10, r = 20, b = 10, l = 10)
+  )
+
+# ggsave(
+#   here::here("writing/tex/figures/importance_both.pdf"),
+#   width = 7,
+#   height = 5
+# )
+```
+
+Total bias by model; how much of the explained variance in decisions is accountable to sensitive attributes?
+
+```{r}
+imp |> 
+  group_by(model, group) |> 
+  summarise(across(c(percentage, lower, upper), sum)) |> 
+  ungroup() |> 
+  filter(group == "Sensitive") |> 
+  ggplot(aes(x = percentage, y = model, color = model, shape = model)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_errorbar(aes(xmin = lower, xmax = upper), width = .05) +
+  scale_color_manual(
+    values = c(
+      "Mistral-7B-Instruct-v0.2" = "#DB0500",
+      "Qwen2-7B-Instruct" = "#6D67E6"
+    )
+  ) +
+  labs(
+    x = "Total Bias",
+    y = "",
+    color = "Model"
+  ) +
+  scale_x_continuous(labels = scales::label_percent()) +
+  #theme_nice(base_size = 18, base_family = "TimesNewRoman") +
+  theme(legend.position = "none")
+
+# ggsave(
+#   here::here("writing/tex/figures/total_bias_both.pdf"),
+#   width = 7,
+#   height = 5
+# )
+```
+
+## Interaction plots for gender/disability (significant for both):
+
+```{r}
+gender_dis <- 
+  both |> 
+  mutate(
+    
+    mod = map(data, function(d) {
+      
+      m <- lm(chosen ~ disability_status*gender, data = d)
+      coeftest(m, vcov. = vcovHC(m, type = "HC2"))
+      
+    }),
+    
+    cmm = map(data, \(d) conditional_mm(chosen ~ disability_status, gender, d)),
+    
+    camce = map(data, \(d) conditional_amce(chosen ~ gender, disability_status, d)),
+    
+    omean = map_dbl(data, \(d) mean(d$chosen, na.rm = TRUE))
+    
+  )
+```
+
+Interaktionsplot:
+
+```{r}
+cmm_data <- gender_dis |>
+  select(model, omean, cmm) |>
+  unnest(cmm) |>
+  mutate(across(c(estimate, lower, upper), \(x) x - omean)) |>
+  filter(gender %in% c("Female", "Male"))
+
+# get baseline rows
+none_stated <- cmm_data |>
+  filter(level == "None stated")
+
+# bind baseline to each non-baseline level explicitly
+cmm_data |>
+  filter(level != "None stated") |>
+  rename(facet = level) |>
+  bind_rows(
+    none_stated |>
+      crossing(facet = c("Physical disability", "Mental health history"))
+  ) |> 
+  mutate(
+    level = if_else(is.na(level), "Yes", "No"),
+    model = model |> factor(levels = c("Mistral-7B-Instruct-v0.2", "Qwen2-7B-Instruct"))
+  ) |> 
+  ggplot(aes(x = level, y = estimate, color = gender, shape = gender)) +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  geom_ribbon(
+    aes(ymin = lower, ymax = upper, fill = gender, group = gender),
+    alpha = .2, color = NA
+  ) +
+  geom_point() +
+  geom_line(aes(group = gender)) +
+  facet_grid(facet ~ model, switch = "y") +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  rcartocolor::scale_fill_carto_d(palette = "Prism") +
+  #theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.1, 0.15),
+    panel.border = element_rect(color = "grey")
+  ) +
+  labs(
+    x = "",
+    y = "Pr(Hired|Gender, Disability) - Pr(Hired)",
+    color = "Gender", shape = "Gender", fill = "Gender"
+  )
+
+# ggsave(
+#   here::here("writing/tex/figures/gender_disability_both.pdf"),
+#   width = 7, height = 5
+# )
+```
+
+"Effect of disability" for men and women (alternative visualization):
+
+```{r}
+gender_dis_small <- 
+  both |> 
+  mutate(
+    camce = map(data, \(d) conditional_amce(chosen ~ disability_status, gender, d))
+  ) |> 
+  select(model, camce) |> 
+  unnest(camce) |> 
+  ungroup() |> 
+  filter(gender != "Non-binary", level != "None stated") |> 
+  mutate(
+    level = level |> factor(levels = c("Physical disability", "Mental health history")),
+    model = model |> factor(levels = c("Mistral-7B-Instruct-v0.2", "Qwen2-7B-Instruct"))
+  )
+
+gender_dis_small |> 
+  ggplot(aes(x = estimate, y = level, color = gender, shape = gender)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(.3)) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(.3)
+  ) +
+  facet_wrap(~model) +
+  scale_y_discrete(
+    labels = (\(x, ...) gsub("\\s", "\n", x))(levels(gender_dis_small$level))
+  ) +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  rcartocolor::scale_fill_carto_d(palette = "Prism") +
+  #theme_nice(base_size = 16, base_family = "TimesNewRoman") +
+  theme(
+    legend.position = "inside", 
+    legend.position.inside = c(0.6, 0.2),
+    panel.border = element_rect(color = "grey")
+  ) +
+  labs(
+    color = "Gender",
+    shape = "Gender",
+    x = "Effect (vs. None stated)",
+    y = ""
+  )
+```
+
+
+### Regression table
+
+```{r}
+reg_res <- 
+  gender_dis |> 
+  mutate(
+    
+    formated = map(mod, function(m) {
+      
+      rownames(m) <- 
+        rownames(m) |> 
+        str_replace_all(c(
+          "disability_status" = "",
+          "gender" = "",
+          ":" = " × "
+        ))
+      
+      m
+      
+    })
+    
+  ) |> 
+  select(model, formated) |> 
+  tibble::deframe()
+
+regtable(reg_res)
+```
+
+As plain latex:
+
+```{r}
+options("modelsummary_format_numeric_latex" = "plain")
+regtable(reg_res, output = "latex_tabular")
+```
+

@@ -1,0 +1,336 @@
+---
+title: "Comparing five different scenarios on Qwen2-7B-Instruct"
+editor: source
+date: today
+format:
+  html:
+    embed-resources: true
+    message: false
+    warning: false
+    highlight-style: pygments
+editor_options:
+  chunk_output_type: console
+---
+
+# Packages
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(tidyr)
+
+source(here::here("code/R/tools.r"))
+
+theme_set(theme_nice())
+```
+
+# Data
+
+```{r}
+PROC <- here::here("code/modular/outputs/processed")
+
+# Shared factor levels across all scenarios
+set_shared_levels <- function(df) {
+  df |>
+    mutate(
+      gender = factor(gender, levels = c("Male", "Female", "Non-binary")),
+      age    = factor(age,    levels = c("30", "35", "40", "45", "50", "55")),
+      race   = factor(race,   levels = c("White", "Black", "Hispanic", "Asian")),
+      disability_status = factor(
+        disability_status,
+        levels = c("None stated", "Physical disability", "Mental health history")
+      ),
+      nationality = factor(
+        nationality,
+        levels = c("American", "Canadian", "German", "Indian", "Mexican")
+      )
+    )
+}
+
+financial_analyst <- readr::read_csv(
+  file.path(PROC, "L_Qwen_Financial_Analyst_PositiveFrame_long.csv")
+) |>
+  set_shared_levels() |>
+  mutate(
+    education      = factor(education, levels = c("Associate Degree", "Bachelor Degree", "Master Degree")),
+    field_of_study = factor(field_of_study, levels = c("Unrelated", "Somewhat related", "Closely related")),
+    cover_letter   = factor(cover_letter, levels = c("Unpersonalized", "Personalized")),
+    recommendations = factor(recommendations, levels = c("Below average", "Average", "Above average")),
+    experience     = factor(experience, levels = c("0-2 years", "3-7 years", "10+ years"))
+  )
+
+registered_nurse <- readr::read_csv(
+  file.path(PROC, "L_Qwen_Registered_Nurse_long.csv")
+) |>
+  set_shared_levels() |>
+  mutate(
+    education      = factor(education, levels = c("Associate Degree", "Bachelor Degree", "Master Degree")),
+    field_of_study = factor(field_of_study, levels = c("Unrelated", "Somewhat related", "Closely related")),
+    cover_letter   = factor(cover_letter, levels = c("Unpersonalized", "Personalized")),
+    recommendations = factor(recommendations, levels = c("Below average", "Average", "Above average")),
+    experience     = factor(experience, levels = c("0-2 years", "3-7 years", "10+ years"))
+  )
+
+software_engineer <- readr::read_csv(
+  file.path(PROC, "L_Qwen_Software_Engineer_long.csv")
+) |>
+  set_shared_levels() |>
+  mutate(
+    education      = factor(education, levels = c("Associate Degree", "Bachelor Degree", "Master Degree")),
+    field_of_study = factor(field_of_study, levels = c("Unrelated", "Somewhat related", "Closely related")),
+    cover_letter   = factor(cover_letter, levels = c("Unpersonalized", "Personalized")),
+    recommendations = factor(recommendations, levels = c("Below average", "Average", "Above average")),
+    experience     = factor(experience, levels = c("0-2 years", "3-7 years", "10+ years"))
+  )
+
+personal_loan <- readr::read_csv(
+  file.path(PROC, "L_Qwen_Personal_Loan_long.csv")
+) |>
+  set_shared_levels() |>
+  mutate(
+    annual_income     = factor(annual_income, levels = c("$35,000", "$60,000", "$95,000", "$140,000")),
+    credit_score      = factor(credit_score, levels = c("Fair", "Good", "Excellent")),
+    employment_length = factor(employment_length, levels = c("Less than 1 year", "2-5 years", "6+ years")),
+    existing_debt     = factor(existing_debt, levels = c("High", "Moderate", "Low")),
+    requested_amount  = factor(requested_amount, levels = c("$30,000", "$15,000", "$5,000"))
+  )
+
+rental_tenancy <- readr::read_csv(
+  file.path(PROC, "L_Qwen_Rental_Tenancy_long.csv")
+) |>
+  set_shared_levels() |>
+  mutate(
+    monthly_income    = factor(monthly_income, levels = c("2x the rent", "3x the rent", "4x the rent")),
+    rental_history    = factor(rental_history, levels = c("Prior late payments", "No prior rental history", "Positive references")),
+    employment_status = factor(employment_status, levels = c("Part-time", "Self-employed", "Full-time")),
+    credit_check      = factor(credit_check, levels = c("Fair", "Good", "Excellent")),
+    deposit_offered   = factor(deposit_offered, levels = c("1 month deposit", "2 months deposit", "3 months deposit"))
+  )
+```
+
+# AMCEs per scenario
+
+```{r}
+amce_financial_analyst <- amce(
+  chosen ~ gender + age + race + disability_status + nationality +
+    education + field_of_study + cover_letter + recommendations + experience,
+  data = financial_analyst
+)
+
+amce_registered_nurse <- amce(
+  chosen ~ gender + age + race + disability_status + nationality +
+    education + field_of_study + cover_letter + recommendations + experience,
+  data = registered_nurse
+)
+
+amce_software_engineer <- amce(
+  chosen ~ gender + age + race + disability_status + nationality +
+    education + field_of_study + cover_letter + recommendations + experience,
+  data = software_engineer
+)
+
+amce_personal_loan <- amce(
+  chosen ~ gender + age + race + disability_status + nationality +
+    annual_income + credit_score + employment_length + existing_debt + requested_amount,
+  data = personal_loan
+)
+
+amce_rental_tenancy <- amce(
+  chosen ~ gender + age + race + disability_status + nationality +
+    monthly_income + rental_history + employment_status + credit_check + deposit_offered,
+  data = rental_tenancy
+)
+```
+
+## Financial Analyst
+
+```{r}
+amce_financial_analyst |>
+  mutate(
+    attr  = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence(),
+    label = stars(p.value)
+  ) |>
+  ggplot(aes(x = estimate, y = level, color = attr)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_text(aes(label = label), position = position_nudge(y = .15), show.legend = FALSE) +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~attr, scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Financial Analyst",
+    x = "AMCE", y = "",
+    caption = "*** p<0.01  ** p<0.05  * p<0.1"
+  )
+```
+
+## Registered Nurse
+
+```{r}
+amce_registered_nurse |>
+  mutate(
+    attr  = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence(),
+    label = stars(p.value)
+  ) |>
+  ggplot(aes(x = estimate, y = level, color = attr)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_text(aes(label = label), position = position_nudge(y = .15), show.legend = FALSE) +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~attr, scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Registered Nurse",
+    x = "AMCE", y = "",
+    caption = "*** p<0.01  ** p<0.05  * p<0.1"
+  )
+```
+
+## Software Engineer
+
+```{r}
+amce_software_engineer |>
+  mutate(
+    attr  = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence(),
+    label = stars(p.value)
+  ) |>
+  ggplot(aes(x = estimate, y = level, color = attr)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_text(aes(label = label), position = position_nudge(y = .15), show.legend = FALSE) +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~attr, scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Software Engineer",
+    x = "AMCE", y = "",
+    caption = "*** p<0.01  ** p<0.05  * p<0.1"
+  )
+```
+
+## Personal Loan
+
+```{r}
+amce_personal_loan |>
+  mutate(
+    attr  = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence(),
+    label = stars(p.value)
+  ) |>
+  ggplot(aes(x = estimate, y = level, color = attr)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_text(aes(label = label), position = position_nudge(y = .15), show.legend = FALSE) +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~attr, scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Personal Loan",
+    x = "AMCE", y = "",
+    caption = "*** p<0.01  ** p<0.05  * p<0.1"
+  )
+```
+
+## Rental Tenancy
+
+```{r}
+amce_rental_tenancy |>
+  mutate(
+    attr  = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence(),
+    label = stars(p.value)
+  ) |>
+  ggplot(aes(x = estimate, y = level, color = attr)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point() +
+  geom_text(aes(label = label), position = position_nudge(y = .15), show.legend = FALSE) +
+  geom_linerange(aes(xmin = lower, xmax = upper)) +
+  facet_wrap(~attr, scales = "free_y", ncol = 2) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Rental Tenancy",
+    x = "AMCE", y = "",
+    caption = "*** p<0.01  ** p<0.05  * p<0.1"
+  )
+```
+
+# Cross-scenario comparison: sensitive attributes
+
+Stack all AMCEs and filter to the shared sensitive attributes to compare bias directly across scenarios.
+
+```{r}
+sensitive_attrs <- c("gender", "age", "race", "disability_status", "nationality")
+
+all_amce <-
+  list(
+    "Financial Analyst" = amce_financial_analyst,
+    "Registered Nurse"  = amce_registered_nurse,
+    "Software Engineer" = amce_software_engineer,
+    "Personal Loan"     = amce_personal_loan,
+    "Rental Tenancy"    = amce_rental_tenancy
+  ) |>
+  bind_rows(.id = "scenario") |>
+  filter(attr %in% sensitive_attrs) |>
+  mutate(
+    scenario = factor(scenario, levels = c(
+      "Financial Analyst", "Registered Nurse", "Software Engineer",
+      "Personal Loan", "Rental Tenancy"
+    )),
+    attr = attr |> gsub("_", " ", x = _) |> stringr::str_to_sentence(),
+    label = stars(p.value)
+  )
+```
+
+## By sensitive attribute (scenarios as color)
+
+```{r}
+#| fig-height: 10
+all_amce |>
+  ggplot(aes(x = estimate, y = level, color = scenario, shape = scenario)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(.5)) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(.5)
+  ) +
+  facet_wrap(~attr, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Sensitive attribute AMCEs across scenarios (Qwen)",
+    x = "AMCE",
+    y = "",
+    color = "Scenario",
+    shape = "Scenario",
+    caption = "Estimates relative to baseline level of each attribute"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+## By scenario (sensitive attributes as rows)
+
+```{r}
+#| fig-height: 10
+all_amce |>
+  ggplot(aes(x = estimate, y = level, color = attr, shape = attr)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(.4)) +
+  geom_linerange(
+    aes(xmin = lower, xmax = upper),
+    position = position_dodge(.4)
+  ) +
+  facet_wrap(~scenario, ncol = 1) +
+  labs(
+    title = "Sensitive attribute AMCEs by scenario (Qwen)",
+    x = "AMCE",
+    y = "",
+    color = "Attribute",
+    shape = "Attribute",
+    caption = "Estimates relative to baseline level of each attribute"
+  ) +
+  theme(legend.position = "bottom")
+
+
+#write.csv(
+#  all_amce,
+#  here::here("code", "modular", "amce_allscenarios.csv"),
+#  row.names = FALSE
+#)
+```

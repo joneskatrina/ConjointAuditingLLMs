@@ -1,0 +1,9 @@
+# Python 3.14
+#
+# API experiments (OpenAI, Anthropic) — no SDK needed, calls go via urllib
+pyyaml
+pandas
+
+# Open-source local model inference (Mistral, Qwen) — requires a CUDA GPU
+torch
+transformers

@@ -1,0 +1,117 @@
+---
+title: "RenderingStrat_singleChoice"
+author: "Katrina Jones"
+date: "2026-06-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r cars}
+library(tidyverse)
+library(cregg)
+library(scales)
+library(broom)
+
+# ── 0. Load & combine ──────────────────────────────────────────────────────────
+
+# (Keep your original paths here)
+path_markdown <- "/Users/katrinajones/Downloads/single_choice_Financial_Analyst_markdown.csv"
+path_list     <- "/Users/katrinajones/Downloads/single_choice_Financial_Analyst_list.csv"
+path_flow     <- "/Users/katrinajones/Downloads/single_choice_Financial_Analyst_flow.csv"
+
+# For demonstration, we assume these files exist and match your snapshot format
+markdown <- read_csv(path_markdown, show_col_types = FALSE) |> mutate(scenario = "choose")
+list     <- read_csv(path_list,     show_col_types = FALSE) |> mutate(scenario = "pick")
+flow     <- read_csv(path_flow,     show_col_types = FALSE) |> mutate(scenario = "select")
+
+all_prompts <- bind_rows(markdown, list, flow)
+write.csv(all_prompts, "/Users/katrinajones/Downloads/AllPromptsFinancialanalyst_long.csv", row.names = FALSE)
+
+
+# ── 1. Prep factors ────────────────────────────────────────────────────────────
+# Updated to match the actual values inside your data snapshot to prevent generating NAs
+all_prompts <- all_prompts |>
+  mutate(
+    scenario        = factor(scenario,          levels = c("choose", "pick", "select")),
+    gender          = factor(gender,            levels = c("Male", "Female", "Non-binary")),
+    age             = factor(as.character(age), levels = c("30", "35", "40", "45", "50", "55")),
+    race            = factor(race,              levels = c("White", "Black", "Asian", "Hispanic")),
+    disability_status = factor(disability_status, levels = c("None stated", "Mental health history", "Physical disability")),
+    nationality     = factor(nationality,       levels = c("American", "Canadian", "German", "Mexican", "Indian")),
+    education       = factor(education,         levels = c("Bachelor Degree", "Associate Degree", "Master Degree")),
+    field_of_study  = factor(field_of_study,    levels = c("Closely related", "Somewhat related", "Unrelated")),
+    cover_letter    = factor(cover_letter,      levels = c("Personalized", "Unpersonalized")),
+    recommendations = factor(recommendations,   levels = c("Average", "Above average", "Below average")),
+    experience      = factor(experience,        levels = c("0-2 years", "3-7 years", "10+ years"))
+  )
+
+
+# ── 2. Attribute terms ────────────────────────────────────────────────────────
+# Replaced non-existent attributes with the ones actually in your dataset
+attr_terms <- c(
+  "gender", "age", "race", "disability_status", "nationality",
+  "education", "field_of_study", "cover_letter", "recommendations", "experience"
+)
+
+# ── 3. Baseline model: attributes only (no prompt) ───────────────────────────
+f_baseline <- as.formula(
+  paste("chosen ~", paste(attr_terms, collapse = " + "))
+)
+
+m_baseline <- lm(f_baseline, data = all_prompts)
+cat("=== Baseline model (attributes only) ===\n")
+cat("Observations:", nobs(m_baseline), "\n")
+cat("R²:", round(summary(m_baseline)$r.squared, 4), "\n\n")
+
+# ── 4. Full interaction model: attributes × prompt ────────────────────────────
+f_full <- as.formula(
+  paste("chosen ~ (", paste(attr_terms, collapse = " + "), ") * scenario")
+)
+
+m_full <- lm(f_full, data = all_prompts)
+cat("=== Full interaction model (attributes × prompt) ===\n")
+cat("Observations:", nobs(m_full), "\n")
+cat("R²:", round(summary(m_full)$r.squared, 4), "\n\n")
+
+# ── 5. ANOVA F-test ───────────────────────────────────────────────────────────
+anova_result <- anova(m_baseline, m_full)
+print(anova_result)
+
+# Added fallback check in case of clean data drops/perfectly nested models
+if (nrow(anova_result) >= 2) {
+  p_val  <- anova_result[["Pr(>F)"]][2]
+  f_stat <- anova_result[["F"]][2]
+  df1    <- anova_result[["Df"]][2]
+  df2    <- anova_result[["Res.Df"]][2]
+  
+  cat("\n=== Interpretation ===\n")
+  cat(sprintf("F(%d, %d) = %.3f, p = %.4f\n", df1, df2, f_stat, p_val))
+  
+  if (is.na(p_val) || p_val > 0.05) {
+    cat("Non-significant (p > .05): prompt rendeing does not affect AMCEs.\n")
+    cat("Safe to pool all prompts for the intersectional analysis.\n")
+  } else {
+    cat("Significant (p <= .05): at least one AMCE differs across prompt phrasings.\n")
+    cat("Inspect interaction coefficients below to identify which attributes are affected.\n")
+  }
+}
+
+#── 6. If significant: which interactions drive the difference? ───────────────
+if (!is.na(p_val) && p_val <= 0.05) {
+  cat("\n=== Significant prompt × attribute interactions ===\n")
+  coefs <- broom::tidy(m_full, conf.int = TRUE)
+  interactions <- coefs |>
+    filter(str_detect(term, "scenario")) |>
+    arrange(p.value)
+  print(interactions, n = 40)
+}
+
+
+
+```
+

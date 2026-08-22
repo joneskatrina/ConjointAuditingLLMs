@@ -1,0 +1,268 @@
+---
+title: "Robustness Checks"
+editor: source
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 2
+    message: false
+    warning: false
+    highlight-style: pygments
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lmtest)
+library(purrr)
+library(sandwich)
+library(stringr)
+library(tidyr)
+
+source(here::here("code/R/tools.r"))
+
+theme_set(theme_nice())
+```
+
+# Data
+
+```{r}
+chatty <- readr::read_csv(
+  here::here("perma_data/Scenarios/FinacialAnalyst/chatgpt.csv"),
+  show_col_types = FALSE
+) |> filter(!is.na(chosen))
+
+claude <- readr::read_csv(
+  here::here("perma_data/Scenarios/FinacialAnalyst/claude.csv"),
+  show_col_types = FALSE
+) |> filter(!is.na(chosen))
+```
+
+## Observation counts
+
+```{r}
+tibble(
+  Model             = c("GPT-5.4 mini", "Claude Haiku 4.5"),
+  `Valid obs`       = c(nrow(chatty), nrow(claude)),
+  Selected          = c(sum(chatty$chosen), sum(claude$chosen)),
+  Rejected          = c(sum(chatty$chosen == 0), sum(claude$chosen == 0)),
+  `Selection rate`  = scales::percent(
+    c(mean(chatty$chosen), mean(claude$chosen)),
+    accuracy = 0.1
+  )
+) |>
+  knitr::kable()
+```
+
+# Construct validity: known-groups design
+
+I run GPT-5.4 mini under three conditions and estimated AMCEs for gender and race.
+
+```{r}
+prep <- function(df) {
+  df |>
+    mutate(
+      across(gender:experience, factor),
+      race = factor(race, levels = c("White", "Black", "Hispanic", "Asian")),
+      gender = factor(gender, levels = c("Male", "Female", "Non-binary")),
+      disability_status = factor(
+        disability_status,
+        levels = c("None stated", "Physical disability", "Mental health history")
+      ),
+      experience = factor(
+        experience,
+        levels = c("0-2 years", "3-7 years", "10+ years")
+      )
+    )
+}
+
+# neutral <- readr::read_csv(
+#   here::here("perma_data/MeasurmentValidity/Sanity_neutralPrompt.csv"),
+#   show_col_types = FALSE
+# ) |> prep()
+
+neutral <- prep(chatty) # just use the normal data, was also build with neutral prompt
+
+anti <- readr::read_csv(
+  here::here("perma_data/MeasurmentValidity/Sanity_AntiDiversity_FinancialAnalyst_long.csv"),
+  show_col_types = FALSE
+) |> prep()
+
+pro <- readr::read_csv(
+  here::here("perma_data/MeasurmentValidity/Sanity_ProDiversity_FinancialAnalyst_long.csv"),
+  show_col_types = FALSE
+) |> prep()
+```
+
+```{r}
+tibble(
+  Condition     = c("Anti-diversity", "Neutral", "Pro-diversity"),
+  `N obs`       = c(nrow(anti), nrow(neutral), nrow(pro)),
+  `Sel. rate`   = scales::percent(
+    c(mean(anti$chosen), mean(neutral$chosen), mean(pro$chosen)),
+    accuracy = 0.1
+  )
+) |>
+  knitr::kable()
+```
+
+## AMCEs: gender and race
+
+```{r}
+full_fml <- chosen ~ gender + age + race + disability_status + nationality +
+  education + field_of_study + cover_letter + recommendations + experience
+
+get_amce_gender_race <- function(df, label) {
+  m   <- lm(full_fml, data = df)
+  res <- coeftest(m, vcov. = vcovHC(m, type = "HC2"))
+  broom::tidy(res) |>
+    filter(grepl("^genderFemale|^raceBlack|^raceHispanic|^raceAsian", term)) |>
+    mutate(
+      Comparison = case_when(
+        term == "genderFemale"  ~ "Male vs. Female",
+        term == "raceBlack"     ~ "Black vs. White",
+        term == "raceHispanic"  ~ "Hispanic vs. White",
+        term == "raceAsian"     ~ "Asian vs. White"
+      ),
+      # Male vs. Female = negative of the Female AMCE; race comparisons are direct
+      `AMCE (pp)` = round(
+        ifelse(term == "genderFemale", -estimate, estimate) * 100,
+        1
+      ),
+      sig = stars(p.value),
+      condition = label
+    ) |>
+    select(condition, Comparison, `AMCE (pp)`, sig, p.value)
+}
+
+validity_res <-
+  bind_rows(
+    get_amce_gender_race(anti,    "Anti-diversity"),
+    get_amce_gender_race(neutral, "Neutral"),
+    get_amce_gender_race(pro,     "Pro-diversity")
+  )
+
+validity_res |>
+  mutate(`AMCE (pp)` = paste0(`AMCE (pp)`, sig)) |>
+  select(-sig, -p.value) |>
+  pivot_wider(names_from = condition, values_from = `AMCE (pp)`) |>
+  knitr::kable(
+    caption = "AMCEs (pp) for gender and race under three prompt conditions. * p<0.1, ** p<0.05, *** p<0.01.",
+    format = "latex"
+  )
+```
+
+Visually:
+
+```{r}
+validity_res |>
+  mutate(
+    condition = factor(
+      condition,
+      levels = c("Anti-diversity", "Neutral", "Pro-diversity")
+    ),
+    Comparison = factor(
+      Comparison,
+      levels = c("Male vs. Female", "Black vs. White", "Hispanic vs. White", "Asian vs. White")
+    )
+  ) |>
+  ggplot(aes(x = `AMCE (pp)`, y = Comparison, color = condition, shape = condition)) +
+  geom_vline(xintercept = 0, lty = "dotted") +
+  geom_point(position = position_dodge(width = 0.4), size = 2) +
+  rcartocolor::scale_color_carto_d(palette = "Prism") +
+  labs(
+    x = "AMCE (percentage points)",
+    y = "",
+    color = "Condition",
+    shape = "Condition",
+    caption = "Full model with all attributes; HC2-robust SEs."
+  ) +
+  theme(legend.position = "bottom")
+```
+
+# Measurement reliability: decision stability
+
+## Verbatim reruns (Claude Haiku 4.5)
+
+The same 10,000 profiles were submitted three times with identical prompts.
+
+```{r}
+c1 <- readr::read_csv(
+  here::here("perma_data/Scenarios/FinacialAnalyst/other_data/claude_data/Claude_1.csv"),
+  show_col_types = FALSE
+)
+c2 <- readr::read_csv(
+  here::here("perma_data/Scenarios/FinacialAnalyst/other_data/claude_data/Claude_2.csv"),
+  show_col_types = FALSE
+)
+c3 <- readr::read_delim(
+  here::here("perma_data/Scenarios/FinacialAnalyst/other_data/claude_data/Claude_3.csv"),
+  delim = ";",
+  show_col_types = FALSE
+)
+
+n   <- nrow(c1)
+all_agree  <- (c1$chosen == c2$chosen) & (c2$chosen == c3$chosen)
+n_agree    <- sum(all_agree, na.rm = TRUE)
+n_disagree <- n - n_agree
+
+tibble(
+  `N profiles`          = n,
+  `All 3 agree`         = n_agree,
+  `At least one differs` = n_disagree,
+  `Agreement rate`      = scales::percent(n_agree / n, accuracy = 0.1)
+) |>
+  knitr::kable()
+```
+
+Pairwise breakdown:
+
+```{r}
+tibble(
+  Pair = c("Run 1 vs. Run 2", "Run 1 vs. Run 3", "Run 2 vs. Run 3"),
+  Agreements = c(
+    sum(c1$chosen == c2$chosen, na.rm = TRUE),
+    sum(c1$chosen == c3$chosen, na.rm = TRUE),
+    sum(c2$chosen == c3$chosen, na.rm = TRUE)
+  )
+) |>
+  mutate(
+    Disagreements = n - Agreements,
+    Rate = scales::percent(Agreements / n, accuracy = 0.1)
+  ) |>
+  knitr::kable()
+```
+
+## Within-dataset order-varied repeats (Claude Haiku 4.5)
+
+Some profiles in the main dataset were drawn more than once (with attribute order
+re-randomized each time).  Agreement rate on these repeated profiles measures
+sensitivity to prompt order.
+
+```{r}
+profile_cols <- c(
+  "gender", "age", "race", "disability_status", "nationality",
+  "education", "field_of_study", "cover_letter", "recommendations", "experience"
+)
+
+dup_analysis <- claude |>
+  group_by(across(all_of(profile_cols))) |>
+  summarise(n = n(), n_distinct_choices = n_distinct(chosen), .groups = "drop")
+
+repeated  <- dup_analysis |> filter(n > 1)
+n_agree   <- sum(repeated$n_distinct_choices == 1)
+
+tibble(
+  `Unique profile combos`          = nrow(dup_analysis),
+  `Seen once`                      = sum(dup_analysis$n == 1),
+  `Seen 2+ times`                  = nrow(repeated),
+  `Total obs in repeated profiles` = sum(repeated$n),
+  `Full agreement`                 = n_agree,
+  `Agreement rate`                 = scales::percent(n_agree / nrow(repeated), accuracy = 0.1)
+) |>
+  knitr::kable()
+```
