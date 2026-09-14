@@ -36,7 +36,7 @@ Experiments were run in March–July 2026.
 │       ├── KnownGroups/                   # Construct validity (anti/pro-diversity conditions)
 │       └── DecisionStability/             # Claude Haiku 4.5 repeated runs (3×10,000)
 ├── figures/                 # All figures as PDFs
-├── MaThesis.pdf             # Full thesis
+├── Thesis.pdf               # Full thesis
 ├── requirements.txt         # Python dependencies
 ├── install_packages.R       # R dependencies (readable fallback)
 └── renv.lock                # Exact R package versions (use with renv::restore())
